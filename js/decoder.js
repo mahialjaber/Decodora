@@ -28,6 +28,23 @@
   const BASE64_TOKEN = /^[A-Za-z0-9+/=_-]+$/;
 
   const MAX_HEX_BYTES = 8192;
+  const ZERO_WIDTH_RE = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
+
+  function stripZeroWidth(str, ctx) {
+    const matches = str.match(ZERO_WIDTH_RE);
+    if (matches && matches.length > 0) {
+      if (ctx) {
+        ctx.warnings.push(matches.length + ' invisible zero-width Unicode character(s) were stripped from the input (common obfuscation trick).');
+      }
+      return str.replace(ZERO_WIDTH_RE, '');
+    }
+    return str;
+  }
+
+  function stripShellObfuscation(str) {
+    // Strip PowerShell/CMD line-continuation escapes (`\n or ^\n) and char-level ticks/carets on flags/cmdlets
+    return str.replace(/[`^]\r?\n[ \t]*/g, '').replace(/[`^](?=[A-Za-z0-9\-_/\\.:])/g, '');
+  }
 
   // RFC 1924 / Python base64.b85encode alphabet (85 chars)
   const B85_RFC_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~';
@@ -293,23 +310,55 @@
   /* ------------------------------------------------------------------ */
 
   function hasPowerShellHint(raw) {
-    const tokens = raw.trim().split(/\s+/);
+    const cleaned = stripShellObfuscation(raw);
+    const tokens = cleaned.trim().split(/\s+/);
     for (let i = 0; i < tokens.length - 1; i++) {
       const tok = stripQuotes(tokens[i]);
       if (FLAG_PREFIX.test(tok) && PS_ENC_FLAG.test(tok.slice(1))) return true;
     }
-    return /FromBase64String\s*\(/i.test(raw);
+    return /FromBase64String\s*\(/i.test(cleaned);
+  }
+
+  function joinQuotedConcat(expr) {
+    // Matches one or more quoted string chunks joined by '+' and optional whitespace
+    const chunkRe = /^\s*(?:["'\u201C\u201D\u2018\u2019]([^"'\u201C\u201D\u2018\u2019]*)["'\u201C\u201D\u2018\u2019])(?:\s*\+\s*["'\u201C\u201D\u2018\u2019]([^"'\u201C\u201D\u2018\u2019]*)["'\u201C\u201D\u2018\u2019])*\s*$/;
+    if (!chunkRe.test(expr)) return null;
+    const parts = [];
+    const litRe = /["'\u201C\u201D\u2018\u2019]([^"'\u201C\u201D\u2018\u2019]*)["'\u201C\u201D\u2018\u2019]/g;
+    let m;
+    while ((m = litRe.exec(expr)) !== null) parts.push(m[1]);
+    return parts.length > 0 ? { joined: parts.join(''), pieces: parts.length } : null;
   }
 
   function extractBase64Payload(raw, ctx) {
-    const input = raw.trim();
+    let input = stripZeroWidth(raw, ctx).trim();
+    const deobf = stripShellObfuscation(input);
+    if (deobf !== input && hasPowerShellHint(input)) {
+      ctx.notes.push('PowerShell/CMD escape characters (` or ^) were normalized before extracting the payload.');
+      input = deobf;
+    }
 
     // a) PowerShell command line: powershell.exe -nop -w hidden -enc <payload>
     const tokens = input.split(/\s+/);
     for (let i = 0; i < tokens.length - 1; i++) {
       const tok = stripQuotes(tokens[i]);
       if (FLAG_PREFIX.test(tok) && PS_ENC_FLAG.test(tok.slice(1))) {
-        const parts = [stripQuotes(tokens[i + 1])];
+        const nextTok = tokens[i + 1];
+        // Handle simple variable assignment like $p='...'+'...'; powershell -enc $p
+        if (/^\$[A-Za-z_][A-Za-z0-9_]*$/.test(nextTok)) {
+          const varName = nextTok.slice(1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const assignMatch = input.match(new RegExp('\\$' + varName + '\\s*=\\s*([^;\\r\\n]+)'));
+          if (assignMatch) {
+            const cat = joinQuotedConcat(assignMatch[1]);
+            if (cat) {
+              ctx.steps.push('PowerShell ' + tok + ' argument (via ' + nextTok + ')');
+              ctx.hint = 'utf-16le';
+              if (cat.pieces > 1) ctx.notes.push('Concatenated string pieces inside ' + nextTok + ' were joined.');
+              return cat.joined;
+            }
+          }
+        }
+        const parts = [stripQuotes(nextTok)];
         for (let j = i + 2; j < tokens.length; j++) {
           const next = stripQuotes(tokens[j]);
           const prev = parts[parts.length - 1];
@@ -326,13 +375,18 @@
       }
     }
 
-    // b) [Convert]::FromBase64String('<payload>')
-    const re = /FromBase64String\s*\(\s*["'\u201C\u201D\u2018\u2019]([^"'\u201C\u201D\u2018\u2019]+)["'\u201C\u201D\u2018\u2019]\s*\)/gi;
+    // b) [Convert]::FromBase64String('<payload>' or ('chunk1' + 'chunk2'))
+    const re = /FromBase64String\s*\(\s*\(*\s*((?:["'\u201C\u201D\u2018\u2019][^"'\u201C\u201D\u2018\u2019]+["'\u201C\u201D\u2018\u2019]\s*(?:\+\s*)?)+)\)*\s*\)/gi;
     const matches = [...input.matchAll(re)];
     if (matches.length > 0) {
       ctx.steps.push('FromBase64String(...) argument');
       if (matches.length > 1) {
         ctx.notes.push('Found ' + matches.length + ' FromBase64String(...) calls. Only the first one was decoded. Paste the others separately to decode them.');
+      }
+      const cat = joinQuotedConcat(matches[0][1]);
+      if (cat) {
+        if (cat.pieces > 1) ctx.notes.push('Concatenated Base64 string segments (' + cat.pieces + ' pieces) were joined.');
+        return cat.joined;
       }
       return matches[0][1];
     }
@@ -343,8 +397,18 @@
     return unquoted;
   }
 
+  function decodeUrlEncodedBase64(s, ctx) {
+    if (!/%2[bBfF]|%3[dD]/i.test(s)) return s;
+    const withoutPct = s.replace(/%2[bB]/g, '+').replace(/%2[fF]/g, '/').replace(/%3[dD]/g, '=');
+    if (/^[A-Za-z0-9+/=_-]+$/.test(withoutPct)) {
+      if (ctx) ctx.notes.push('URL-encoded Base64 characters (%2B/%2F/%3D) were percent-decoded.');
+      return withoutPct;
+    }
+    return s;
+  }
+
   function base64ToBytes(payload, ctx) {
-    let s = payload;
+    let s = stripZeroWidth(payload, ctx);
 
     ctx.looksLikeWords = s.split('\n').some(function (line) {
       return line.trim().split(/[ \t]+/).length >= 4;
@@ -354,6 +418,8 @@
       s = s.replace(/\s+/g, '');
       ctx.notes.push('Spaces and line breaks were removed from the Base64 text.');
     }
+
+    s = decodeUrlEncodedBase64(s, ctx);
 
     // URL-safe Base64 uses '-' and '_' instead of '+' and '/'.
     if (/[-_]/.test(s)) {
@@ -505,8 +571,12 @@
     return new Uint8Array(out);
   }
 
+  function isCompressedBinary(b) {
+    return (b.length >= 3 && b[0] === 0x1f && b[1] === 0x8b && b[2] === 0x08) || isZlibHeader(b);
+  }
+
   async function runBase85Mode(raw, ctx) {
-    let s = stripQuotes(raw.trim());
+    let s = stripQuotes(stripZeroWidth(raw, ctx).trim());
     if (s !== raw.trim()) {
       ctx.notes.push('Surrounding quotation marks were removed.');
     }
@@ -557,6 +627,12 @@
           bytes = bytesR; variant = 'Base85 (RFC 1924 / Python)';
           ctx.warnings.push.apply(ctx.warnings, subR.warnings);
         } else if (textA && !textR) {
+          bytes = bytesA; variant = 'Ascii85';
+          ctx.warnings.push.apply(ctx.warnings, subA.warnings);
+        } else if (isCompressedBinary(bytesR) && !isCompressedBinary(bytesA)) {
+          bytes = bytesR; variant = 'Base85 (RFC 1924 / Python)';
+          ctx.warnings.push.apply(ctx.warnings, subR.warnings);
+        } else if (isCompressedBinary(bytesA) && !isCompressedBinary(bytesR)) {
           bytes = bytesA; variant = 'Ascii85';
           ctx.warnings.push.apply(ctx.warnings, subA.warnings);
         } else {
@@ -729,8 +805,8 @@
     return null;
   }
 
-  function runUrlMode(raw, ctx) {
-    let s = stripQuotes(raw.trim());
+  function inspectUrlPass(inputUrl, ctx) {
+    let s = stripQuotes(inputUrl.trim());
     let changed = false;
 
     // 1. Re-fang defanged URLs & indicators
@@ -819,8 +895,6 @@
       }
 
       // c) De-obfuscate IP hostnames (Hex, Dword, Octal)
-      // Note: WHATWG URL() normalizes hex/dword/octal IPs in parsed.hostname automatically,
-      // so we inspect rawHost extracted before URL() normalization.
       const ipInfo = bareIpCheck || deobfuscateHostIp(parsed.hostname);
       if (ipInfo) {
         ctx.steps.push(ipInfo.type + ' \u2192 ' + ipInfo.ip);
@@ -835,7 +909,7 @@
 
       for (const [key, val] of parsed.searchParams.entries()) {
         const cleanVal = val.trim();
-        if (REDIRECT_KEYS.includes(key.toLowerCase()) && /^(?:https?|ftp):\/\//i.test(cleanVal)) {
+        if (REDIRECT_KEYS.includes(key.toLowerCase()) && /^(?:https?|hxxps?|ftp):(?:\[\:\])?\/\//i.test(cleanVal)) {
           unwrappedTarget = cleanVal;
           if (hostLower.includes('safelinks.protection.outlook.com')) {
             ctx.steps.push('Outlook SafeLinks unwrapped');
@@ -846,7 +920,6 @@
           }
           changed = true;
         } else if (cleanVal.length >= 8 && /^[A-Za-z0-9+/=_-]+$/.test(cleanVal)) {
-          // Check if query parameter value is Base64-encoded readable text
           try {
             const subCtx = { steps: [], notes: [], warnings: [], hint: null };
             const b = base64ToBytes(cleanVal, subCtx);
@@ -869,23 +942,55 @@
       // Not a full URL with scheme; could be a query string or path fragment
     }
 
-    if (!changed && decodedParams.length === 0) {
-      // If the user explicitly ran URL mode on a plain URL, still show a helpful breakdown
-      if (/^(?:https?|ftp):\/\//i.test(s)) {
-        ctx.steps.push('URL inspected (no encoding obfuscation found)');
-        ctx.notes.push('This URL did not contain percent-encoding, defanged brackets, or redirect wrappers.');
+    return { url: s, changed: changed, unwrappedTarget: unwrappedTarget, decodedParams: decodedParams };
+  }
+
+  function runUrlMode(raw, ctx) {
+    const cleanRaw = stripZeroWidth(raw, ctx);
+    const first = inspectUrlPass(cleanRaw, ctx);
+    let current = first.url;
+    let changed = first.changed;
+    const allParams = [...first.decodedParams];
+    let target = first.unwrappedTarget;
+    let firstWrapper = target ? first.url : null;
+
+    // Recursively unwrap & inspect destination URLs (e.g. SafeLinks -> @/hex-IP/Proofpoint/redirect)
+    let hops = 0;
+    const seen = new Set([current]);
+    while (target && hops < 4 && !seen.has(target)) {
+      seen.add(target);
+      hops++;
+      const next = inspectUrlPass(target, ctx);
+      if (next.changed) changed = true;
+      allParams.push.apply(allParams, next.decodedParams);
+      if (next.unwrappedTarget) {
+        target = next.unwrappedTarget;
       } else {
-        throw new Error('No URL encoding (%XX), defanged indicators (hxxp, [.]), or obfuscated URL patterns were found in the input.');
+        target = next.url;
+        break;
       }
     }
 
-    let finalOutput = unwrappedTarget ? unwrappedTarget : s;
-    if (unwrappedTarget && unwrappedTarget !== s) {
-      finalOutput = unwrappedTarget + '\n\n--- Original Wrapper URL ---\n' + s;
+    // Deduplicate identical warnings/notes added across passes
+    ctx.warnings = [...new Set(ctx.warnings)];
+    ctx.notes = [...new Set(ctx.notes)];
+
+    if (!changed && allParams.length === 0) {
+      if (/^(?:https?|ftp):\/\//i.test(current)) {
+        ctx.steps.push('URL inspected (no encoding obfuscation found)');
+        ctx.notes.push('This URL did not contain percent-encoding, defanged brackets, or redirect wrappers.');
+      } else {
+        throw new Error('No URL encoding (%XX), defanged indicators (hxxp, [.], or [:]), or obfuscated URL patterns were found in the input.');
+      }
     }
-    if (decodedParams.length > 0) {
+
+    let finalOutput = target ? target : current;
+    if (target && firstWrapper && target !== firstWrapper) {
+      finalOutput = target + '\n\n--- Original Wrapper URL ---\n' + firstWrapper;
+    }
+    if (allParams.length > 0) {
       ctx.steps.push('Base64 query parameter(s) decoded');
-      finalOutput += '\n\n--- Decoded Query Parameters ---\n' + decodedParams.join('\n');
+      finalOutput += '\n\n--- Decoded Query Parameters ---\n' + allParams.join('\n');
     }
 
     return revealControlChars(finalOutput, ctx);
@@ -895,38 +1000,73 @@
   /* Mode 4: Hex & Escape Strings                                       */
   /* ------------------------------------------------------------------ */
 
-  async function runHexMode(raw, ctx) {
-    let s = stripQuotes(raw.trim());
-
-    // 1. Check for \uXXXX or \u{XXXX} Unicode escapes (without \xNN)
-    if (/\\u(?:\{[0-9a-fA-F]+\}|[0-9a-fA-F]{4})/.test(s) && !/\\x[0-9a-fA-F]{2}/.test(s)) {
-      ctx.steps.push('Unicode escapes (\\uNNNN)');
-      const decoded = s
-        .replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, function (_, h) { return String.fromCodePoint(parseInt(h, 16)); })
-        .replace(/\\u([0-9a-fA-F]{4})/g, function (_, h) { return String.fromCharCode(parseInt(h, 16)); });
-      return revealControlChars(decoded, ctx);
-    }
-
-    // 2. Check for \xNN hex escapes
-    if (/\\x[0-9a-fA-F]{2}/.test(s)) {
-      ctx.steps.push('Hex escapes (\\xNN)');
-      const hexPairs = [];
-      const stripped = s.replace(/\\x([0-9a-fA-F]{2})/g, function (_, h) {
-        hexPairs.push(parseInt(h, 16));
-        return '';
-      }).trim();
-      if (stripped.length === 0) {
-        const bytes = new Uint8Array(hexPairs);
-        return bytesToOutput(bytes, ctx, 0);
-      }
-      // Mixed text and \xNN escapes
-      const mixed = s.replace(/\\x([0-9a-fA-F]{2})/g, function (_, h) {
+  function decodeMixedEscapes(str, ctx) {
+    let hadUnicode = false;
+    let cur = str
+      .replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, function (_, h) {
+        hadUnicode = true;
+        return String.fromCodePoint(parseInt(h, 16));
+      })
+      .replace(/\\u([0-9a-fA-F]{4})/g, function (_, h) {
+        hadUnicode = true;
         return String.fromCharCode(parseInt(h, 16));
       });
-      return revealControlChars(mixed, ctx);
+    if (hadUnicode) ctx.steps.push('Unicode escapes (\\uNNNN)');
+
+    if (/\\x[0-9a-fA-F]{2}/i.test(cur)) {
+      ctx.steps.push('Hex escapes (\\xNN)');
+      const utf8Dec = new TextDecoder('utf-8', { fatal: false });
+      cur = cur.replace(/(?:\\x[0-9a-fA-F]{2})+/gi, function (run) {
+        const bytes = new Uint8Array(run.length / 4);
+        for (let i = 0; i < bytes.length; i++) {
+          bytes[i] = parseInt(run.slice(i * 4 + 2, i * 4 + 4), 16);
+        }
+        return utf8Dec.decode(bytes);
+      });
+    }
+    return cur;
+  }
+
+  async function runHexMode(raw, ctx) {
+    let s = stripQuotes(stripZeroWidth(raw, ctx).trim());
+
+    // 1. Check for \xNN and/or \uNNNN escape sequences
+    const hasHexEsc = /\\x[0-9a-fA-F]{2}/i.test(s);
+    const hasUniEsc = /\\u(?:\{[0-9a-fA-F]+\}|[0-9a-fA-F]{4})/.test(s);
+    if (hasHexEsc || hasUniEsc) {
+      if (hasHexEsc && !hasUniEsc) {
+        const hexPairs = [];
+        const stripped = s.replace(/\\x([0-9a-fA-F]{2})/gi, function (_, h) {
+          hexPairs.push(parseInt(h, 16));
+          return '';
+        }).trim();
+        if (stripped.length === 0) {
+          ctx.steps.push('Hex escapes (\\xNN)');
+          const bytes = new Uint8Array(hexPairs);
+          return bytesToOutput(bytes, ctx, 0);
+        }
+      }
+      return revealControlChars(decodeMixedEscapes(s, ctx), ctx);
     }
 
-    // 3. Raw hex, 0x-prefixed hex, or space/colon/comma/dash separated hex bytes
+    // 2. Check for PowerShell / C byte arrays: [byte[]](0x49,0x45,0x58) or {0x49, 0x45}
+    const oxMatches = s.match(/\b0x[0-9a-fA-F]{1,2}\b/gi);
+    if (oxMatches && oxMatches.length >= 2) {
+      const rem = s
+        .replace(/\b0x[0-9a-fA-F]{1,2}\b/gi, '')
+        .replace(/^(?:\[byte\[\]\]|\(byte\[\]\)|new\s+byte\[\s*\]|byte\[\s*\])/i, '')
+        .replace(/[\s,;()[\]{}]+/g, '');
+      if (rem.length === 0) {
+        if (/[\[({]/.test(s)) {
+          ctx.notes.push('Byte-array wrapper syntax (such as [byte[]], braces, or commas) was removed before decoding.');
+        }
+        const bytes = new Uint8Array(oxMatches.map(function (tok) { return parseInt(tok.slice(2), 16); }));
+        ctx.steps.push('Hexadecimal byte array (' + bytes.length + ' bytes)');
+        return bytesToOutput(bytes, ctx, 0);
+      }
+    }
+
+    // 3. Raw hex, single 0x-prefixed hex, or space/colon/comma/dash separated hex bytes
     let cleaned = s
       .replace(/0x/gi, '')
       .replace(/[\s,:\-;]+/g, '');
@@ -963,16 +1103,30 @@
   /* Auto-Detection Router                                              */
   /* ------------------------------------------------------------------ */
 
+  function tryStrictAsciiOrUtf8(bytes) {
+    if (!bytes || bytes.length < 4) return false;
+    const t = detectText(bytes, { steps: [], notes: [], warnings: [], hint: null });
+    return Boolean(t && printableRatio(t.text) >= 0.95);
+  }
+
   function detectAutoMode(raw) {
-    const s = stripQuotes(raw.trim());
+    const cleanRaw = stripZeroWidth(raw, null);
+    const s = stripQuotes(cleanRaw.trim());
 
     // 1. PowerShell -enc / -EncodedCommand or FromBase64String is always Base64
-    if (hasPowerShellHint(raw)) return 'base64';
+    if (hasPowerShellHint(cleanRaw)) return 'base64';
 
-    // 2. Ascii85 <~ ... ~> wrapper is always Base85
-    if (/<~[\s\S]*~/.test(s)) return 'base85';
+    // 2. Ascii85 <~ ... ~> (or truncated <~...) wrapper is always Base85
+    if (/^<~/.test(s)) return 'base85';
 
-    // 3. URL / Defanged URL / Percent-encoded string
+    // 3. URL / Defanged URL / Percent-encoded string (check URL-encoded Base64 before routing raw %XX tokens to URL)
+    if (/%2[bBfF]|%3[dD]/i.test(s) && !/[:/]/.test(s) && !/\[\s*\.\s*\]|\(\s*\.\s*\)/.test(s) && !/\s/.test(s)) {
+      const b64Cand = decodeUrlEncodedBase64(s, null);
+      if (b64Cand !== s && BASE64_TOKEN.test(b64Cand)) {
+        return 'base64';
+      }
+    }
+
     if (
       /^(?:https?|hxxps?|ftp|fxp):\/\//i.test(s) ||
       /^(?:https?|hxxps?)\[\s*:\s*\]\/\//i.test(s) ||
@@ -983,10 +1137,11 @@
       return 'url';
     }
 
-    // 4. Explicit \xNN or \uNNNN escapes or 0x.. hex lists
-    if (/^(?:\\x[0-9a-fA-F]{2})+$/i.test(s.replace(/\s+/g, '')) ||
-        /\\u[0-9a-fA-F]{4}/.test(s) ||
-        /^(?:0x[0-9a-fA-F]{2}[\s,]+)+0x[0-9a-fA-F]{2}$/i.test(s) ||
+    // 4. Explicit \xNN / \uNNNN escapes (pure or mixed with text) or 0x.. hex arrays/lists
+    const oxTokens = s.match(/\b0x[0-9a-fA-F]{1,2}\b/gi);
+    if ((oxTokens && oxTokens.length >= 2 && s.replace(/\b0x[0-9a-fA-F]{1,2}\b/gi, '').replace(/^(?:\[byte\[\]\]|\(byte\[\]\)|new\s+byte\[\s*\]|byte\[\s*\])/i, '').replace(/[\s,;()[\]{}]+/g, '').length === 0) ||
+        /\\x[0-9a-fA-F]{2}/i.test(s) ||
+        /\\u(?:\{[0-9a-fA-F]{1,6}\}|[0-9a-fA-F]{4})/.test(s) ||
         /^(?:[0-9a-fA-F]{2}[:\-]){3,}[0-9a-fA-F]{2}$/.test(s)) {
       return 'hex';
     }
@@ -996,30 +1151,33 @@
       return 'hex';
     }
 
-    // 6. Continuous hex string (only 0-9a-fA-F, even length >= 8) where hex decodes cleanly to text
-    //    and Base64 does not decode cleanly to text.
+    // 6. Continuous hex string (optional single 0x prefix, even length >= 8) where hex yields text or Gzip/Zlib
     const noSpace = s.replace(/\s+/g, '');
-    if (noSpace.length >= 8 && noSpace.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(noSpace)) {
-      const hexBytes = new Uint8Array(noSpace.length / 2);
+    const hasSingle0x = /^0x[0-9a-fA-F]{8,}$/i.test(noSpace);
+    const hexBody = hasSingle0x ? noSpace.slice(2) : noSpace;
+    if (hexBody.length >= 8 && hexBody.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(hexBody)) {
+      const hexBytes = new Uint8Array(hexBody.length / 2);
       for (let i = 0; i < hexBytes.length; i++) {
-        hexBytes[i] = parseInt(noSpace.slice(i * 2, i * 2 + 2), 16);
+        hexBytes[i] = parseInt(hexBody.slice(i * 2, i * 2 + 2), 16);
       }
+      if (hasSingle0x) return 'hex';
+      if (isCompressedBinary(hexBytes)) return 'hex';
       const hexText = detectText(hexBytes, { steps: [], notes: [], warnings: [], hint: null });
       if (hexText) {
-        // Check if Base64 also produces clean text
         let b64Clean = false;
         try {
           const b64Bytes = base64ToBytes(noSpace, { steps: [], notes: [], warnings: [], hint: null });
-          const b64Text = detectText(b64Bytes, { steps: [], notes: [], warnings: [], hint: null });
-          if (b64Text) b64Clean = true;
+          if (tryStrictAsciiOrUtf8(b64Bytes)) b64Clean = true;
         } catch (e) {}
         if (!b64Clean) return 'hex';
       }
     }
 
-    // 7. Base85 without <~ ~>: contains >10% non-Base64 characters that belong to Base85 alphabets
-    const nonB64 = noSpace.match(/[^A-Za-z0-9+/=_-]/g) || [];
-    if (noSpace.length >= 4 && nonB64.length / noSpace.length > 0.1 && !/\s/.test(s.trim())) {
+    // 7. Base85 without <~ ~>: single token or line-wrapped block (not multi-word English prose)
+    const isLineWrapped = !s.split(/\r?\n/).some(function (line) {
+      return line.trim().split(/[ \t]+/).length >= 3;
+    });
+    if (noSpace.length >= 4 && isLineWrapped) {
       const allAscii85 = [...noSpace].every(function (ch) {
         const c = ch.charCodeAt(0);
         return (c >= 33 && c <= 117) || ch === 'z' || ch === 'y';
@@ -1029,7 +1187,47 @@
         return c < 128 && B85_RFC_MAP[c] !== -1;
       });
       if (allAscii85 || allRfc85) {
-        return 'base85';
+        const nonB64 = noSpace.match(/[^A-Za-z0-9+/=_-]/g) || [];
+        if (nonB64.length / noSpace.length > 0.1) {
+          return 'base85';
+        }
+        // Low/zero-punctuation Base85 check: verify Base85 decodes cleanly to text/compressed binary while Base64 does not
+        if (nonB64.length > 0) {
+          let b85Good = false;
+          try {
+            const bA = allAscii85 ? decodeAscii85Bytes(noSpace, { steps: [], notes: [], warnings: [], hint: null }) : null;
+            if (bA && (tryStrictAsciiOrUtf8(bA) || isCompressedBinary(bA))) b85Good = true;
+          } catch (e) {}
+          try {
+            const bR = !b85Good && allRfc85 ? decodeRfc1924Bytes(noSpace, { steps: [], notes: [], warnings: [], hint: null }) : null;
+            if (bR && (tryStrictAsciiOrUtf8(bR) || isCompressedBinary(bR))) b85Good = true;
+          } catch (e) {}
+          if (b85Good) return 'base85';
+        } else if (noSpace.length >= 5) {
+          // Even zero-punctuation Base85 (pure A-Za-z0-9+-_) when Base64 yields binary junk whereas Base85 yields 100% ASCII text
+          let b64ReadableOrCompressed = false;
+          try {
+            const b64B = base64ToBytes(noSpace, { steps: [], notes: [], warnings: [], hint: null });
+            if (tryStrictAsciiOrUtf8(b64B) || isCompressedBinary(b64B) || knownSignature(b64B)) b64ReadableOrCompressed = true;
+          } catch (e) {}
+          if (!b64ReadableOrCompressed) {
+            const isCleanAscii = function (bytes) {
+              return bytes && bytes.length >= 4 && bytes.every(function (x) {
+                return (x >= 0x20 && x <= 0x7e) || x === 9 || x === 10 || x === 13;
+              });
+            };
+            try {
+              const sA = { steps: [], notes: [], warnings: [], hint: null };
+              const bA = allAscii85 ? decodeAscii85Bytes(noSpace, sA) : null;
+              if (sA.warnings.length === 0 && isCleanAscii(bA)) return 'base85';
+            } catch (e) {}
+            try {
+              const sR = { steps: [], notes: [], warnings: [], hint: null };
+              const bR = allRfc85 ? decodeRfc1924Bytes(noSpace, sR) : null;
+              if (sR.warnings.length === 0 && isCleanAscii(bR)) return 'base85';
+            } catch (e) {}
+          }
+        }
       }
     }
 
@@ -1040,6 +1238,46 @@
   /* ------------------------------------------------------------------ */
   /* Public API                                                         */
   /* ------------------------------------------------------------------ */
+
+  async function runModePass(rawInput, mode, ctx) {
+    if (mode === 'base85') return await runBase85Mode(rawInput, ctx);
+    if (mode === 'url') return runUrlMode(rawInput, ctx);
+    if (mode === 'hex') return await runHexMode(rawInput, ctx);
+    return await runBase64Mode(rawInput, ctx);
+  }
+
+  function detectFollowUpLayer(text, prevMode) {
+    if (typeof text !== 'string') return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+
+    if (hasPowerShellHint(trimmed)) return 'base64';
+    if (/^<~/.test(trimmed)) return 'base85';
+
+    // Standalone obfuscated URL output from Base64/Hex/Base85
+    if (prevMode !== 'url' && !/\s/.test(trimmed)) {
+      if (
+        /^(?:hxxps?|fxp):\/\//i.test(trimmed) ||
+        /^(?:https?|hxxps?)\[\s*:\s*\]\/\//i.test(trimmed) ||
+        (/\[\s*\.\s*\]|\(\s*\.\s*\)|urldefense|safelinks/i.test(trimmed) && /^(?:https?|hxxps?)/i.test(trimmed)) ||
+        /^https?:\/\/(?:0x[0-9a-f]+|0[0-7]{8,}|[0-9]{7,10}|[^/@\s]+@|[^\s]*%[0-9a-f]{2})/i.test(trimmed)
+      ) {
+        return 'url';
+      }
+    }
+
+    // Nested Hex or Base85 or single-token Base64 (avoid breaking multi-word decoded scripts)
+    if (!/\s/.test(trimmed)) {
+      const m = detectAutoMode(trimmed);
+      if (m === 'hex' || m === 'base85') return m;
+      if (m === 'base64' && trimmed.length >= 12 && /^[A-Za-z0-9+/=_-]+$/.test(trimmed)) {
+        return 'base64';
+      }
+    } else if (/\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|^\[byte\[\]\]/i.test(trimmed)) {
+      return 'hex';
+    }
+    return null;
+  }
 
   /**
    * Decode user input.
@@ -1069,16 +1307,38 @@
     const effectiveMode = selectedMode === 'auto' ? detectAutoMode(raw) : selectedMode;
 
     try {
-      let output;
-      if (effectiveMode === 'base85') {
-        output = await runBase85Mode(raw, ctx);
-      } else if (effectiveMode === 'url') {
-        output = runUrlMode(raw, ctx);
-      } else if (effectiveMode === 'hex') {
-        output = await runHexMode(raw, ctx);
-      } else {
-        output = await runBase64Mode(raw, ctx);
+      let output = await runModePass(raw, effectiveMode, ctx);
+
+      // In Auto-Detect mode, automatically peel nested encoding layers cleanly when unambiguous
+      if (selectedMode === 'auto') {
+        const seen = new Set([raw.trim(), output]);
+        let curMode = effectiveMode;
+        for (let depth = 1; depth < 5; depth++) {
+          const nextMode = detectFollowUpLayer(output, curMode);
+          if (!nextMode) break;
+          const nextCtx = { steps: [], notes: [], warnings: [], hint: null };
+          let nextOutput = null;
+          try {
+            nextOutput = await runModePass(output, nextMode, nextCtx);
+          } catch (e) {
+            break;
+          }
+          // Reject nested passes that yield hex dumps of random binary or unchanged output
+          if (!nextOutput || seen.has(nextOutput) || nextCtx.steps.includes('Binary data (hex view)')) {
+            break;
+          }
+          seen.add(nextOutput);
+          output = nextOutput;
+          curMode = nextMode;
+          ctx.steps.push('\u21B3 Layer ' + (depth + 1));
+          ctx.steps.push.apply(ctx.steps, nextCtx.steps);
+          ctx.notes.push.apply(ctx.notes, nextCtx.notes);
+          ctx.warnings.push.apply(ctx.warnings, nextCtx.warnings);
+        }
+        ctx.notes = [...new Set(ctx.notes)];
+        ctx.warnings = [...new Set(ctx.warnings)];
       }
+
       return result(true, output, null, effectiveMode);
     } catch (e) {
       return result(false, '', e && e.message ? e.message : 'Decoding failed.', effectiveMode);

