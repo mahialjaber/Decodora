@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/banner.jpg" alt="Decodora banner" width="100%">
-</p>
-
 <h1 align="center">🔓 Decodora</h1>
 
 <p align="center">
