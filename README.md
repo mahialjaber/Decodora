@@ -14,11 +14,16 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/mahialjaber/Decodora/actions/workflows/ci.yml"><img src="https://github.com/mahialjaber/Decodora/actions/workflows/ci.yml/badge.svg" alt="Tests"></a>
   <img src="https://img.shields.io/badge/HTML%20%2B%20CSS%20%2B%20JS-vanilla-f7df1e?style=flat-square" alt="Vanilla JS">
   <img src="https://img.shields.io/badge/works-offline-2ea44f?style=flat-square" alt="Offline">
   <img src="https://img.shields.io/badge/data%20uploaded-none-2ea44f?style=flat-square" alt="No uploads">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT license">
   <a href="https://github.com/mahialjaber"><img src="https://img.shields.io/badge/author-Mahi%20Al%20Jaber-orange?style=flat-square&logo=github" alt="Author"></a>
+</p>
+
+<p align="center">
+  <img src="assets/ui-preview.png" alt="Decodora user interface decoding an obfuscated PowerShell stager" width="100%">
 </p>
 
 ---
