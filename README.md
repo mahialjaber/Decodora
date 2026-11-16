@@ -33,6 +33,7 @@
 | **Base85** | Decodes **Adobe Ascii85** (`<~…~>`, `z`/`y` shortcuts) and **RFC 1924 / Python `b85encode`** |
 | **URL** | Re-fangs `hxxps[:]//` & `[.]`, unwraps multi-layer `%XX`, extracts **SafeLinks** & **Proofpoint** targets, resolves **Hex / Dword / Octal IPs**, and flags `@` phishing tricks |
 | **Hex** | Decodes raw/spaced hex dumps, `0x` byte arrays, `\xNN` hex escapes, and `\uNNNN` Unicode escapes |
+| **Reverse** | Reverses backwards commands, scripts, URLs, and multi-layer `Base64 → Base64 → Reversed` payloads |
 
 ## 🛡️ Security & OPSEC
 

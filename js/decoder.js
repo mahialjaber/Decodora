@@ -6,11 +6,12 @@
  * (module.exports) so it can be tested from the command line.
  *
  * Supported modes:
- *  - 'auto'   : Automatically detects Base64/PS, Base85, Obfuscated URL, or Hex
- *  - 'base64' : Base64 (standard & URL-safe) and PowerShell -EncodedCommand
- *  - 'base85' : Ascii85 (<~...~> or raw) and RFC 1924 / Python Base85
- *  - 'url'    : Percent-encoding, defanged URLs, redirect wrappers, obfuscated IPs
- *  - 'hex'    : Raw hex strings, 0x bytes, \xNN escapes, \uNNNN escapes
+ *  - 'auto'    : Automatically detects Base64/PS, Base85, Obfuscated URL, Hex, or Reversed strings
+ *  - 'base64'  : Base64 (standard & URL-safe) and PowerShell -EncodedCommand
+ *  - 'base85'  : Ascii85 (<~...~> or raw) and RFC 1924 / Python Base85
+ *  - 'url'     : Percent-encoding, defanged URLs, redirect wrappers, obfuscated IPs
+ *  - 'hex'     : Raw hex strings, 0x bytes, \xNN escapes, \uNNNN escapes
+ *  - 'reverse' : Reverses backwards commands, scripts, URLs, and multi-layer reversed payloads
  *
  * Design rules:
  *  - Decoded content is only ever returned as a string. It is never evaluated.
@@ -1100,6 +1101,141 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* Mode 5: Reverse Command / String Decoder                           */
+  /* ------------------------------------------------------------------ */
+
+  const FORWARD_CMD_PATTERNS = [
+    /\b(?:powershell|pwsh|mshta|rundll32|regsvr32|certutil|bitsadmin|wscript|cscript|schtasks|wmic|whoami|ipconfig|systeminfo|netstat|tasklist)(?:\.exe)?\b/i,
+    /(?:^|[\s;|(&"'])cmd(?:\.exe)?\s+\/[ck]\b/i,
+    /\b(?:Invoke-Expression|Invoke-WebRequest|Invoke-RestMethod|Invoke-Command|Invoke-Mimikatz|New-Object|Start-Process|Get-Process|Get-ChildItem|Get-Content|Set-Content|Set-Item|Set-ExecutionPolicy|Add-MpPreference|Add-Type|FromBase64String|DownloadString|DownloadFile|DownloadData|WebClient|MemoryStream|GzipStream|DeflateStream|StreamReader)\b/i,
+    /(?:^|[\s;|(&"'])(?:IEX|iex)(?=[\s("'])/,
+    /(?:^|\s)-(?:NoP|NoProfile|NonI|NonInteractive|WindowStyle|ExecutionPolicy|Exec|EncodedCommand|enc|Command)\b/i,
+    /\b(?:Get|Set|New|Start|Stop|Invoke|Add|Remove|Write|Read|Out|Test|Select|Where|ForEach)-[A-Z][A-Za-z0-9]+\b/,
+    /\b(?:https?|hxxps?|ftp):(?:\[\s*:\s*\])?\/\/[A-Za-z0-9.\-_[\]]+/i,
+    /\b(?:eval\s*\(|Function\s*\(|document\.(?:write|createElement|cookie|location)|window\.location|String\.fromCharCode|ActiveXObject|WScript\.Shell|CreateObject\s*\(|app\.launchURL)\b/i,
+    /(?:^|\n)\s*#!\/(?:usr\/bin\/env\s+|bin\/)(?:ba)?sh\b/,
+    /(?:^|[\s;|(&])(?:curl|wget|chmod|bash|python3?|perl|php|ruby)\s+-\S+/
+  ];
+
+  const REVERSED_STRUCTURAL_PATTERNS = [
+    /\/\/(?:\]\s*:\s*\[|:)(?:sptth|ptth|spxxh|pxxh|ptf)\b/i,
+    /\b(?:exe|1sp|tab|dmc|sbv|sj|lld)\.[A-Za-z0-9_-]{2,}\b/i,
+    /\b[A-Za-z0-9]+-(?:teG|teS|weN|tratS|potS|ekovnI|ddA|evomeR|etirW|daeR|tuO)\b/i,
+    /(?:^|\s)(?:PoN|oN|InoN|neddiH\s+W|ssapyB\s+cexE|cne|dnammoCdedocnE)-(?=\s|$)/i
+  ];
+
+  function reverseString(str) {
+    const normalized = str.replace(/\r\n/g, '\n');
+    // Fast path for pure ASCII (handles massive commands in <1ms)
+    if (!/[^\x00-\x7F]/.test(normalized)) {
+      return normalized.split('').reverse().join('');
+    }
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+      const parts = [];
+      for (const item of seg.segment(normalized)) {
+        parts.push(item.segment);
+      }
+      return parts.reverse().join('');
+    }
+    return Array.from(normalized).reverse().join('');
+  }
+
+  function countMatches(str, patterns) {
+    let count = 0;
+    for (let i = 0; i < patterns.length; i++) {
+      if (patterns[i].test(str)) count++;
+    }
+    return count;
+  }
+
+  function looksLikeReversedPayload(raw) {
+    if (typeof raw !== 'string') return false;
+    const s = stripZeroWidth(raw, null).trim();
+    if (s.length < 5) return false;
+
+    // Never classify already-forward PowerShell -enc or forward URLs as reversed
+    if (hasPowerShellHint(s)) return false;
+    if (/^(?:https?|hxxps?|ftp|fxp)(?:\[\s*:\s*\])?:\/\//i.test(s) || /urldefense|safelinks/i.test(s)) return false;
+
+    const rev = reverseString(s);
+    if (rev === s) return false;
+
+    const fwdHits = countMatches(s, FORWARD_CMD_PATTERNS);
+    const revHits = countMatches(rev, FORWARD_CMD_PATTERNS);
+    const revStructHits = countMatches(s, REVERSED_STRUCTURAL_PATTERNS);
+
+    if (fwdHits === 0 && (revHits > 0 || revStructHits > 0)) {
+      return true;
+    }
+
+    // Reversed Ascii85 wrapper: >~ ... ~<
+    if (/^>~[\s\S]*~<$/.test(s)) return true;
+
+    // Reversed \xNN or \uNNNN escape sequences: e.g. 96x\d6x\16x\f6x\86x\77x\
+    if (/(?:[0-9a-fA-F]{2}x\\){3,}/i.test(s) || /(?:[0-9a-fA-F]{4}u\\){3,}/i.test(s)) return true;
+
+    // Reversed padded Base64: starts with '=' or '==' and ends with valid Base64 characters
+    const noSpace = s.replace(/\s+/g, '');
+    if (/^={1,2}[A-Za-z0-9+/_-]{8,}$/.test(noSpace)) {
+      try {
+        const revB64 = reverseString(noSpace);
+        const sub = { steps: [], notes: [], warnings: [], hint: null };
+        const bytes = base64ToBytes(revB64, sub);
+        if (sub.warnings.length === 0 && (tryStrictAsciiOrUtf8(bytes) || isCompressedBinary(bytes) || detectText(bytes, sub))) {
+          return true;
+        }
+      } catch (e) {}
+    }
+
+    // Reversed unpadded Base64 where forward Base64 is unreadable binary but reversed Base64 is clean text
+    if (/^[A-Za-z0-9+/_-]{16,}$/.test(noSpace) && noSpace.length % 4 === 0) {
+      let fwdValid = false;
+      try {
+        const subF = { steps: [], notes: [], warnings: [], hint: null };
+        const fBytes = base64ToBytes(noSpace, subF);
+        if (detectText(fBytes, subF) || isCompressedBinary(fBytes) || knownSignature(fBytes)) {
+          fwdValid = true;
+        }
+      } catch (e) {}
+      if (!fwdValid) {
+        try {
+          const revB64 = reverseString(noSpace);
+          const subR = { steps: [], notes: [], warnings: [], hint: null };
+          const rBytes = base64ToBytes(revB64, subR);
+          const rText = detectText(rBytes, subR);
+          if (subR.warnings.length === 0 && rText && printableRatio(rText.text) >= 0.98) {
+            return true;
+          }
+        } catch (e) {}
+      }
+    }
+
+    return false;
+  }
+
+  function runReverseMode(raw, ctx) {
+    const cleaned = stripZeroWidth(raw, ctx);
+    const trimmed = cleaned.trim();
+    if (trimmed.length === 0) {
+      throw new Error('No text found to reverse.');
+    }
+    if (trimmed !== cleaned) {
+      ctx.notes.push('Leading or trailing whitespace was trimmed before reversing.');
+    }
+
+    const reversed = reverseString(trimmed);
+    const charCount = Array.from(reversed).length;
+    ctx.steps.push('Reversed string (' + charCount + ' chars)');
+
+    if (countMatches(reversed, FORWARD_CMD_PATTERNS) > 0 && countMatches(trimmed, FORWARD_CMD_PATTERNS) === 0) {
+      ctx.notes.push('Reversed command or script syntax was detected and restored to normal forward order.');
+    }
+
+    return revealControlChars(reversed, ctx);
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Auto-Detection Router                                              */
   /* ------------------------------------------------------------------ */
 
@@ -1118,6 +1254,9 @@
 
     // 2. Ascii85 <~ ... ~> (or truncated <~...) wrapper is always Base85
     if (/^<~/.test(s)) return 'base85';
+
+    // 3. Reversed command, URL, or reversed encoded payload
+    if (looksLikeReversedPayload(cleanRaw)) return 'reverse';
 
     // 3. URL / Defanged URL / Percent-encoded string (check URL-encoded Base64 before routing raw %XX tokens to URL)
     if (/%2[bBfF]|%3[dD]/i.test(s) && !/[:/]/.test(s) && !/\[\s*\.\s*\]|\(\s*\.\s*\)/.test(s) && !/\s/.test(s)) {
@@ -1243,6 +1382,7 @@
     if (mode === 'base85') return await runBase85Mode(rawInput, ctx);
     if (mode === 'url') return runUrlMode(rawInput, ctx);
     if (mode === 'hex') return await runHexMode(rawInput, ctx);
+    if (mode === 'reverse') return runReverseMode(rawInput, ctx);
     return await runBase64Mode(rawInput, ctx);
   }
 
@@ -1253,8 +1393,9 @@
 
     if (hasPowerShellHint(trimmed)) return 'base64';
     if (/^<~/.test(trimmed)) return 'base85';
+    if (prevMode !== 'reverse' && looksLikeReversedPayload(trimmed)) return 'reverse';
 
-    // Standalone obfuscated URL output from Base64/Hex/Base85
+    // Standalone obfuscated URL output from Base64/Hex/Base85/Reverse
     if (prevMode !== 'url' && !/\s/.test(trimmed)) {
       if (
         /^(?:hxxps?|fxp):\/\//i.test(trimmed) ||
@@ -1269,7 +1410,7 @@
     // Nested Hex or Base85 or single-token Base64 (avoid breaking multi-word decoded scripts)
     if (!/\s/.test(trimmed)) {
       const m = detectAutoMode(trimmed);
-      if (m === 'hex' || m === 'base85') return m;
+      if (m === 'hex' || m === 'base85' || (m === 'reverse' && prevMode !== 'reverse')) return m;
       if (m === 'base64' && trimmed.length >= 12 && /^[A-Za-z0-9+/=_-]+$/.test(trimmed)) {
         return 'base64';
       }
@@ -1282,7 +1423,7 @@
   /**
    * Decode user input.
    * @param {string} raw - Input text to decode.
-   * @param {string} [mode='auto'] - 'auto' | 'base64' | 'base85' | 'url' | 'hex'
+   * @param {string} [mode='auto'] - 'auto' | 'base64' | 'base85' | 'url' | 'hex' | 'reverse'
    * @returns {Promise<{ok:boolean, output:string, steps:string[], notes:string[], warnings:string[], error:string|null, mode:string}>}
    */
   async function decode(raw, mode) {
@@ -1313,7 +1454,7 @@
       if (selectedMode === 'auto') {
         const seen = new Set([raw.trim(), output]);
         let curMode = effectiveMode;
-        for (let depth = 1; depth < 5; depth++) {
+        for (let depth = 1; depth < 6; depth++) {
           const nextMode = detectFollowUpLayer(output, curMode);
           if (!nextMode) break;
           const nextCtx = { steps: [], notes: [], warnings: [], hint: null };
@@ -1345,7 +1486,7 @@
     }
   }
 
-  const api = { decode: decode };
+  const api = { decode: decode, reverseString: reverseString };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   root.DecodoraDecoder = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

