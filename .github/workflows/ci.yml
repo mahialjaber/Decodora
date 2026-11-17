@@ -19,4 +19,4 @@ jobs:
           node-version: '20'
 
       - name: Run unit tests
-        run: node --test tests/decoder.test.js
+        run: node --test tests/decoder.test.js tests/ioc.test.js tests/samples.test.js

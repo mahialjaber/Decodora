@@ -3,12 +3,14 @@
  * It only caches Decodora's own files. User input never leaves the page.
  * Bump CACHE_VERSION whenever app files change.
  */
-const CACHE_VERSION = 'decodora-v3';
+const CACHE_VERSION = 'decodora-v4';
 const APP_FILES = [
   './',
   './index.html',
   './css/style.css',
   './js/decoder.js',
+  './js/ioc.js',
+  './js/samples.js',
   './js/app.js',
   './icon.svg'
 ];

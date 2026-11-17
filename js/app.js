@@ -15,8 +15,17 @@
   const copyMsg = document.getElementById('copy-msg');
   const modeGroup = document.getElementById('mode-group');
   const modeBtns = modeGroup ? Array.from(modeGroup.querySelectorAll('.mode-btn')) : [];
+  const copyDefangedBtn = document.getElementById('copy-defanged');
+  const samplesBox = document.getElementById('samples');
+  const iocPanel = document.getElementById('ioc-panel');
+  const iocList = document.getElementById('ioc-list');
+  const iocCount = document.getElementById('ioc-count');
+  const iocMsg = document.getElementById('ioc-msg');
+  const IOC = window.DecodoraIOC;
+  const SAMPLES = Array.isArray(window.DecodoraSamples) ? window.DecodoraSamples : [];
 
   let currentMode = 'auto';
+  let currentIocs = [];
 
   const PLACEHOLDERS = {
     auto: 'Paste Base64, PowerShell -enc, Base85, Obfuscated URL, or Hex, e.g.\npowershell.exe -NoP -W Hidden -enc SQBFAFgAIAAoACcAaABlAGwAbABvACcAKQA=',
@@ -51,6 +60,15 @@
     } else {
       title.textContent = '\u2713 Decoded successfully';
     }
+    if (result.ok) {
+      const layers = result.steps.filter(function (s) { return /^\u21B3 Layer/.test(s); }).length + 1;
+      if (layers > 1) {
+        const badge = document.createElement('span');
+        badge.className = 'layer-badge';
+        badge.textContent = layers + ' layers peeled';
+        title.appendChild(badge);
+      }
+    }
     status.appendChild(title);
 
     // On failure, show only the reason to keep the message clear.
@@ -75,13 +93,77 @@
     status.hidden = false;
   }
 
+  /* ------------------------------------------------------------------ */
+  /* IOC panel                                                          */
+  /* ------------------------------------------------------------------ */
+
+  function hideIocs() {
+    currentIocs = [];
+    iocList.replaceChildren();
+    iocMsg.textContent = '';
+    iocPanel.hidden = true;
+  }
+
+  function renderIocs(text) {
+    if (!IOC || !text) { hideIocs(); return; }
+    currentIocs = IOC.extract(text);
+    iocList.replaceChildren();
+    iocMsg.textContent = '';
+    if (currentIocs.length === 0) { iocPanel.hidden = true; return; }
+
+    currentIocs.forEach(function (item) {
+      const li = document.createElement('li');
+      li.className = 'ioc-item';
+
+      const type = document.createElement('span');
+      type.className = 'ioc-type ioc-type-' + item.type.toLowerCase();
+      type.textContent = item.type;
+      li.appendChild(type);
+
+      const value = document.createElement('code');
+      value.className = 'ioc-value';
+      value.textContent = item.defanged;
+      value.title = 'Raw: ' + item.value;
+      li.appendChild(value);
+
+      if (item.note) {
+        const tag = document.createElement('span');
+        tag.className = 'ioc-tag';
+        tag.textContent = item.note;
+        li.appendChild(tag);
+      }
+
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ioc-copy';
+      btn.textContent = 'Copy';
+      btn.setAttribute('aria-label', 'Copy defanged ' + item.type);
+      btn.addEventListener('click', function () { copyText(item.defanged, iocMsg, item.type + ' copied (defanged).'); });
+      li.appendChild(btn);
+
+      iocList.appendChild(li);
+    });
+
+    iocCount.textContent = String(currentIocs.length);
+    iocPanel.hidden = false;
+  }
+
+  // Grow/shrink the output box to its content (between CSS min-height and 560px).
+  function fitOutput() {
+    output.style.height = 'auto';
+    output.style.height = Math.min(Math.max(output.scrollHeight + 2, 0), 560) + 'px';
+  }
+
   async function runDecode() {
     decodeBtn.disabled = true;
     copyMsg.textContent = '';
     try {
       const result = await window.DecodoraDecoder.decode(input.value, currentMode);
       output.value = result.output;
+      fitOutput();
       showStatus(result);
+      const isBinary = result.steps.indexOf('Binary data (hex view)') !== -1;
+      if (result.ok && !isBinary) renderIocs(result.output); else hideIocs();
     } finally {
       decodeBtn.disabled = false;
     }
@@ -102,35 +184,101 @@
     }
   }
 
-  async function copyOutput() {
-    if (!output.value) {
-      copyMsg.textContent = 'Nothing to copy.';
+  async function copyText(text, msgEl, okMsg) {
+    if (!text) {
+      msgEl.textContent = 'Nothing to copy.';
       return;
     }
     try {
-      await navigator.clipboard.writeText(output.value);
-      copyMsg.textContent = 'Copied.';
+      await navigator.clipboard.writeText(text);
+      msgEl.textContent = okMsg || 'Copied.';
     } catch (e) {
       // Fallback for browsers that block the Clipboard API.
-      output.focus();
-      output.select();
+      const tmp = document.createElement('textarea');
+      tmp.value = text;
+      tmp.setAttribute('readonly', '');
+      tmp.style.position = 'fixed';
+      tmp.style.opacity = '0';
+      document.body.appendChild(tmp);
+      tmp.select();
       const ok = document.execCommand && document.execCommand('copy');
-      copyMsg.textContent = ok ? 'Copied.' : 'Copy failed \u2014 select the text and press Ctrl+C.';
+      document.body.removeChild(tmp);
+      msgEl.textContent = ok ? (okMsg || 'Copied.') : 'Copy failed \u2014 select the text and press Ctrl+C.';
     }
+  }
+
+  function copyOutput() {
+    copyText(output.value, copyMsg, 'Copied.');
+  }
+
+  function copyOutputDefanged() {
+    if (!output.value) { copyMsg.textContent = 'Nothing to copy.'; return; }
+    const safe = IOC ? IOC.defangText(output.value) : output.value;
+    copyText(safe, copyMsg, safe === output.value ? 'Copied (no indicators to defang).' : 'Copied with indicators defanged.');
   }
 
   function clearAll() {
     input.value = '';
     output.value = '';
+    output.style.height = '';
     copyMsg.textContent = '';
     status.replaceChildren();
     status.hidden = true;
+    hideIocs();
     input.focus();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* One-click samples                                                  */
+  /* ------------------------------------------------------------------ */
+
+  function loadSample(id) {
+    const sample = SAMPLES.find(function (s) { return s.id === id; });
+    if (!sample) return false;
+    input.value = sample.payload;
+    if (samplesBox) {
+      samplesBox.querySelectorAll('.sample-btn').forEach(function (b) {
+        b.classList.toggle('active', b.getAttribute('data-sample') === id);
+      });
+    }
+    setMode('auto'); // also triggers decode because the input is not empty
+    return true;
+  }
+
+  if (samplesBox) {
+    SAMPLES.forEach(function (s) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sample-btn';
+      btn.setAttribute('data-sample', s.id);
+      btn.title = s.chain;
+      const name = document.createElement('span');
+      name.className = 'sample-name';
+      name.textContent = s.label;
+      const chain = document.createElement('span');
+      chain.className = 'sample-chain';
+      chain.textContent = s.chain;
+      btn.appendChild(name);
+      btn.appendChild(chain);
+      btn.addEventListener('click', function () { loadSample(s.id); });
+      samplesBox.appendChild(btn);
+    });
+    if (SAMPLES.length === 0) samplesBox.hidden = true;
   }
 
   decodeBtn.addEventListener('click', runDecode);
   copyBtn.addEventListener('click', copyOutput);
+  if (copyDefangedBtn) copyDefangedBtn.addEventListener('click', copyOutputDefanged);
   clearBtn.addEventListener('click', clearAll);
+  document.getElementById('ioc-copy-defanged').addEventListener('click', function () {
+    copyText(currentIocs.map(function (i) { return i.defanged; }).join('\n'), iocMsg, 'All indicators copied (defanged).');
+  });
+  document.getElementById('ioc-copy-raw').addEventListener('click', function () {
+    copyText(currentIocs.map(function (i) { return i.value; }).join('\n'), iocMsg, 'All indicators copied (raw \u2014 handle with care).');
+  });
+  document.getElementById('ioc-copy-csv').addEventListener('click', function () {
+    copyText(IOC ? IOC.toCsv(currentIocs) : '', iocMsg, 'CSV copied (defanged).');
+  });
   modeBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
       setMode(btn.getAttribute('data-mode') || 'auto');
@@ -314,6 +462,15 @@
   }
 
   initThemeAndPullCord();
+
+  // Editing the input by hand deselects the highlighted sample.
+  input.addEventListener('input', function () {
+    if (samplesBox) samplesBox.querySelectorAll('.sample-btn.active').forEach(function (b) { b.classList.remove('active'); });
+  });
+
+  // Shareable demo links: #sample=<id> loads one of the built-in samples (never user data).
+  const hashMatch = window.location.hash.match(/^#sample=([a-z0-9-]+)$/i);
+  if (hashMatch) loadSample(hashMatch[1]);
 
   // Offline support: cache the app files after the first visit.
   if ('serviceWorker' in navigator) {
