@@ -31,7 +31,7 @@
 **CyberChef** is a full Swiss Army knife where you assemble multi-step recipes by hand. **Decodora is the express triage lane** when an EDR alert, phishing email, or sandbox log drops an ugly obfuscated string on your desk and you want the plain text and ticket-safe IOCs in a single paste:
 
 * **Zero recipes** — Paste raw alert telemetry (`powershell -e^n^c ...`, `hxxps[:]//nam12.safelinks...`, `Base64 → Gzip → Reversed`). **Auto-Detect** identifies the outer format and automatically peels up to **6 nested encoding layers**.
-* **Ticket-ready IOC extraction** — Extracts URLs, domains, IPv4s, emails, hashes, and CVEs from the decoded output, filters out `.NET` / PowerShell type names (`System.IO.MemoryStream`) and filenames (`.ps1`, `.exe`), and presents everything **defanged** (`hxxps[:]//`, `[.]`, `[@]`) for one-click copy or CSV export.
+* **Ticket-ready IOC extraction** — Extracts URLs, domains, IPv4s, emails, hashes, and CVEs from the decoded output, filters out `.NET` / PowerShell type names (`System.IO.MemoryStream`) and filenames (`.ps1`, `.exe`), and presents everything **defanged** (`hxxps[:]//`, `[.]`, `[@]`) for one-click safe copy.
 * **Built for high-noise obfuscation** — Automatically strips PowerShell/CMD backtick & caret escapes, detects zero-width Unicode injection, unwraps Outlook SafeLinks & Proofpoint URL Defense, resolves Hex/Dword/Octal IPs, and flags phishing `@` userinfo lures.
 
 ---
@@ -76,7 +76,7 @@ No suspicious clipboard payload handy? Click any synthetic alert sample below to
   * `wrapper` (`safelinks.protection.outlook.com`, `urldefense.proofpoint.com`)
   * `lure (@ userinfo)` (spoofed brand domain before `@` in `https://login.microsoftonline.com@203.0.113.47/`)
   * `private`, `loopback`, `link-local`, `CGNAT`, `multicast`, `reserved` IPv4 ranges
-* **Zero Clickable Output:** Copy the **entire decoded script with IOCs defanged** (`Copy defanged`), copy all defanged IOCs as a list (`Copy all (defanged)`), or export straight to **CSV** (`type,value_defanged,note`).
+* **Zero Clickable Output:** Copy the **entire decoded script with IOCs defanged** (`Copy defanged`), copy all defanged IOCs as a list (`Copy all (defanged)`), or copy single indicators with one click.
 
 ---
 

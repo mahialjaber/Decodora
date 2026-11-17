@@ -41,55 +41,88 @@
       </div>
     </header>
 
-    <section class="panel">
-      <div class="label-row">
-        <label for="input">Input</label>
-      </div>
-      <div class="samples" id="samples" role="group" aria-label="Load a sample payload">
-        <span class="samples-label">Try a real-world sample:</span>
-      </div>
-      <textarea id="input" spellcheck="false" autocomplete="off" autocapitalize="off"
-        placeholder="Paste Base64, PowerShell -enc, Base85, Obfuscated URL, or Hex, e.g.&#10;powershell.exe -NoP -W Hidden -enc SQBFAFgAIAAoACcAaABlAGwAbABvACcAKQA="></textarea>
-      <div class="actions">
-        <button id="decode" type="button" class="primary">Decode</button>
-        <div class="mode-group" id="mode-group" role="group" aria-label="Decoding format">
-          <button type="button" class="mode-btn active" data-mode="auto" aria-pressed="true">Auto-Detect</button>
-          <button type="button" class="mode-btn" data-mode="base64" aria-pressed="false">Base64 / PS</button>
-          <button type="button" class="mode-btn" data-mode="base85" aria-pressed="false">Base85</button>
-          <button type="button" class="mode-btn" data-mode="url" aria-pressed="false">URL</button>
-          <button type="button" class="mode-btn" data-mode="hex" aria-pressed="false">Hex</button>
-          <button type="button" class="mode-btn" data-mode="reverse" aria-pressed="false">Reverse</button>
+    <div class="workspace">
+      <div class="lane-left">
+        <section class="panel panel-input">
+          <div class="panel-head">
+            <label for="input">Input</label>
+            <span class="hint">Raw command, encoded blob, or wrapped URL</span>
+          </div>
+          <textarea id="input" spellcheck="false" autocomplete="off" autocapitalize="off"
+            placeholder="Paste Base64, PowerShell -enc, Base85, Obfuscated URL, or Hex, e.g.&#10;powershell.exe -NoP -W Hidden -enc SQBFAFgAIAAoACcAaABlAGwAbABvACcAKQA="></textarea>
+          <div class="actions">
+            <button id="decode" type="button" class="primary">Decode</button>
+            <div class="mode-group" id="mode-group" role="group" aria-label="Decoding format">
+              <button type="button" class="mode-btn active" data-mode="auto" aria-pressed="true">Auto-Detect</button>
+              <button type="button" class="mode-btn" data-mode="base64" aria-pressed="false">Base64 / PS</button>
+              <button type="button" class="mode-btn" data-mode="base85" aria-pressed="false">Base85</button>
+              <button type="button" class="mode-btn" data-mode="url" aria-pressed="false">URL</button>
+              <button type="button" class="mode-btn" data-mode="hex" aria-pressed="false">Hex</button>
+              <button type="button" class="mode-btn" data-mode="reverse" aria-pressed="false">Reverse</button>
+            </div>
+            <span class="hint">Ctrl + Enter</span>
+          </div>
+        </section>
+
+        <div class="flow-pipe-v" aria-hidden="true" title="Input flows to decoded output">
+          <svg viewBox="0 0 24 24" width="20" height="20">
+            <path d="M12 3v16M6 13l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
         </div>
-        <span class="hint">Ctrl + Enter</span>
-      </div>
-    </section>
 
-    <div id="status" class="status" role="status" aria-live="polite" hidden></div>
-
-    <section class="panel">
-      <label for="output">Decoded output</label>
-      <textarea id="output" readonly spellcheck="false" placeholder="Decoded text will appear here."></textarea>
-      <div class="actions">
-        <button id="copy" type="button">Copy</button>
-        <button id="copy-defanged" type="button" title="Copy the output with every URL, domain, IP and email defanged">Copy defanged</button>
-        <button id="clear" type="button">Clear</button>
-        <span id="copy-msg" class="hint" aria-live="polite"></span>
+        <section class="panel panel-output">
+          <div class="panel-head">
+            <label for="output">Decoded output</label>
+            <span class="hint">Plain text only — never executed</span>
+          </div>
+          <textarea id="output" readonly spellcheck="false" placeholder="Decoded text will appear here."></textarea>
+          <div class="actions">
+            <button id="copy" type="button">Copy</button>
+            <button id="copy-defanged" type="button" title="Copy the output with every URL, domain, IP and email defanged">Copy defanged</button>
+            <button id="clear" type="button">Clear</button>
+            <span id="copy-msg" class="hint" aria-live="polite"></span>
+          </div>
+        </section>
       </div>
-    </section>
 
-    <section class="panel" id="ioc-panel" hidden>
-      <div class="ioc-head">
-        <h2 class="ioc-title">Indicators of compromise <span id="ioc-count" class="ioc-count"></span></h2>
-        <div class="ioc-actions">
-          <button id="ioc-copy-defanged" type="button" class="primary">Copy all (defanged)</button>
-          <button id="ioc-copy-raw" type="button">Copy raw</button>
-          <button id="ioc-copy-csv" type="button">Copy CSV</button>
-        </div>
+      <div class="lane-right">
+        <section class="panel panel-samples" id="samples-panel">
+          <div class="panel-head">
+            <h2 class="panel-heading">Try a real-world sample</h2>
+            <span class="hint">Click to load &amp; decode</span>
+          </div>
+          <div class="samples-grid" id="samples" role="group" aria-label="Load a sample payload"></div>
+        </section>
+
+        <div id="status" class="status" role="status" aria-live="polite" hidden></div>
+
+        <section class="panel panel-ioc" id="ioc-panel" hidden>
+          <div class="ioc-pipe-bridge" aria-hidden="true" title="Extracted from decoded output">
+            <svg viewBox="0 0 28 24" width="24" height="22">
+              <path d="M2 12h20M17 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <div class="ioc-head">
+            <div class="ioc-title-group">
+              <h2 class="ioc-title">Indicators of compromise <span id="ioc-count" class="ioc-count"></span></h2>
+              <span class="ioc-pipe-flag">
+                <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                  <path d="M3 3v7h9M9 7l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Piped from decoded output
+              </span>
+            </div>
+            <div class="ioc-actions">
+              <button id="ioc-copy-defanged" type="button" class="primary">Copy all (defanged)</button>
+              <button id="ioc-copy-raw" type="button">Copy raw</button>
+            </div>
+          </div>
+          <p class="hint ioc-hint">Shown defanged so nothing is clickable. Wrapper, lure and private/reserved values are tagged.</p>
+          <ul id="ioc-list" class="ioc-list"></ul>
+          <span id="ioc-msg" class="hint" aria-live="polite"></span>
+        </section>
       </div>
-      <p class="hint ioc-hint">Shown defanged so nothing is clickable. Wrapper, lure and private/reserved values are tagged.</p>
-      <ul id="ioc-list" class="ioc-list"></ul>
-      <span id="ioc-msg" class="hint" aria-live="polite"></span>
-    </section>
+    </div>
 
     <footer class="footer">
       All decoding happens locally in your browser. Nothing is uploaded or sent anywhere.

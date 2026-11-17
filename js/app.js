@@ -16,6 +16,7 @@
   const modeGroup = document.getElementById('mode-group');
   const modeBtns = modeGroup ? Array.from(modeGroup.querySelectorAll('.mode-btn')) : [];
   const copyDefangedBtn = document.getElementById('copy-defanged');
+  const samplesPanel = document.getElementById('samples-panel');
   const samplesBox = document.getElementById('samples');
   const iocPanel = document.getElementById('ioc-panel');
   const iocList = document.getElementById('ioc-list');
@@ -225,6 +226,7 @@
     status.replaceChildren();
     status.hidden = true;
     hideIocs();
+    if (samplesBox) samplesBox.querySelectorAll('.sample-btn.active').forEach(function (b) { b.classList.remove('active'); });
     input.focus();
   }
 
@@ -263,7 +265,7 @@
       btn.addEventListener('click', function () { loadSample(s.id); });
       samplesBox.appendChild(btn);
     });
-    if (SAMPLES.length === 0) samplesBox.hidden = true;
+    if (SAMPLES.length === 0 && samplesPanel) samplesPanel.hidden = true;
   }
 
   decodeBtn.addEventListener('click', runDecode);
@@ -275,9 +277,6 @@
   });
   document.getElementById('ioc-copy-raw').addEventListener('click', function () {
     copyText(currentIocs.map(function (i) { return i.value; }).join('\n'), iocMsg, 'All indicators copied (raw \u2014 handle with care).');
-  });
-  document.getElementById('ioc-copy-csv').addEventListener('click', function () {
-    copyText(IOC ? IOC.toCsv(currentIocs) : '', iocMsg, 'CSV copied (defanged).');
   });
   modeBtns.forEach(function (btn) {
     btn.addEventListener('click', function () {
