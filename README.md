@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/mahialjaber/Decodora/actions/workflows/ci.yml"><img src="https://github.com/mahialjaber/Decodora/actions/workflows/ci.yml/badge.svg" alt="CI Tests"></a>
-  <img src="https://img.shields.io/badge/unit%20tests-58%20passing-2ea44f?style=flat-square" alt="58 unit tests passing">
+  <img src="https://img.shields.io/badge/unit%20tests-67%20passing-2ea44f?style=flat-square" alt="67 unit tests passing">
   <img src="https://img.shields.io/badge/CSP-connect--src%20'none'-2ea44f?style=flat-square" alt="Strict CSP">
   <img src="https://img.shields.io/badge/works-offline%20(PWA)-2ea44f?style=flat-square" alt="Offline PWA">
   <img src="https://img.shields.io/badge/HTML%20%2B%20CSS%20%2B%20JS-vanilla-f7df1e?style=flat-square" alt="Vanilla JS">
@@ -103,7 +103,7 @@ cd Decodora
 python -m http.server 8000   # open http://localhost:8000
 ```
 
-Run the Node.js unit test suite (`58` tests covering decoding, IOC extraction, and sample verification):
+Run the Node.js unit test suite (`67` tests covering decoding, IOC extraction, and sample verification):
 
 ```bash
 node --test tests/*.test.js

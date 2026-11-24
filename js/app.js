@@ -16,6 +16,9 @@
   const modeGroup = document.getElementById('mode-group');
   const modeBtns = modeGroup ? Array.from(modeGroup.querySelectorAll('.mode-btn')) : [];
   const copyDefangedBtn = document.getElementById('copy-defanged');
+  const copyTicketBtn = document.getElementById('copy-ticket');
+  const iocCopyTicketBtn = document.getElementById('ioc-copy-ticket');
+  const iocPipeLabel = document.getElementById('ioc-pipe-label');
   const samplesPanel = document.getElementById('samples-panel');
   const samplesBox = document.getElementById('samples');
   const iocPanel = document.getElementById('ioc-panel');
@@ -27,6 +30,7 @@
 
   let currentMode = 'auto';
   let currentIocs = [];
+  let lastDecodeResult = null;
 
   const PLACEHOLDERS = {
     auto: 'Paste your payload here...',
@@ -105,12 +109,15 @@
     iocPanel.hidden = true;
   }
 
-  function renderIocs(text) {
+  function renderIocs(text, sourceLabel) {
     if (!IOC || !text) { hideIocs(); return; }
     currentIocs = IOC.extract(text);
     iocList.replaceChildren();
     iocMsg.textContent = '';
     if (currentIocs.length === 0) { iocPanel.hidden = true; return; }
+    if (iocPipeLabel) {
+      iocPipeLabel.textContent = sourceLabel || 'Piped from decoded output';
+    }
 
     currentIocs.forEach(function (item) {
       const li = document.createElement('li');
@@ -159,12 +166,42 @@
     decodeBtn.disabled = true;
     copyMsg.textContent = '';
     try {
-      const result = await window.DecodoraDecoder.decode(input.value, currentMode);
-      output.value = result.output;
-      fitOutput();
-      showStatus(result);
+      const rawText = input.value;
+      const result = await window.DecodoraDecoder.decode(rawText, currentMode);
       const isBinary = result.steps.indexOf('Binary data (hex view)') !== -1;
-      if (result.ok && !isBinary) renderIocs(result.output); else hideIocs();
+
+      if (result.ok) {
+        lastDecodeResult = result;
+        output.value = result.output;
+        fitOutput();
+        showStatus(result);
+        if (!isBinary) renderIocs(result.output, 'Piped from decoded output'); else hideIocs();
+      } else {
+        // Fallback: if the input is unencoded raw alert text containing IOCs, extract & defang them directly.
+        const rawIocs = (IOC && rawText.trim() !== '') ? IOC.extract(rawText) : [];
+        if (rawIocs.length > 0) {
+          const fallbackResult = {
+            ok: true,
+            output: rawText.trim(),
+            steps: ['Raw input (IOC extraction & defanging)'],
+            notes: ['No outer encoding layer was detected; extracted ' + rawIocs.length + ' indicator(s) directly from the raw alert text.'],
+            warnings: [],
+            error: null,
+            mode: currentMode
+          };
+          lastDecodeResult = fallbackResult;
+          output.value = fallbackResult.output;
+          fitOutput();
+          showStatus(fallbackResult);
+          renderIocs(fallbackResult.output, 'Extracted from raw input');
+        } else {
+          lastDecodeResult = result;
+          output.value = '';
+          fitOutput();
+          showStatus(result);
+          hideIocs();
+        }
+      }
     } finally {
       decodeBtn.disabled = false;
     }
@@ -213,9 +250,27 @@
   }
 
   function copyOutputDefanged() {
-    if (!output.value) { copyMsg.textContent = 'Nothing to copy.'; return; }
-    const safe = IOC ? IOC.defangText(output.value) : output.value;
-    copyText(safe, copyMsg, safe === output.value ? 'Copied (no indicators to defang).' : 'Copied with indicators defanged.');
+    const sourceText = output.value || input.value.trim();
+    if (!sourceText) { copyMsg.textContent = 'Nothing to copy.'; return; }
+    const safe = IOC ? IOC.defangText(sourceText) : sourceText;
+    copyText(safe, copyMsg, safe === sourceText ? 'Copied (no indicators to defang).' : 'Copied with indicators defanged.');
+  }
+
+  function copyTicketNote(msgEl) {
+    const targetMsg = msgEl || copyMsg;
+    const sourceText = output.value || input.value.trim();
+    if (!sourceText || !IOC || typeof IOC.toTicketMarkdown !== 'function') {
+      targetMsg.textContent = 'Nothing to copy.';
+      return;
+    }
+    const md = IOC.toTicketMarkdown({
+      steps: lastDecodeResult && lastDecodeResult.steps ? lastDecodeResult.steps : [],
+      warnings: lastDecodeResult && lastDecodeResult.warnings ? lastDecodeResult.warnings : [],
+      notes: lastDecodeResult && lastDecodeResult.notes ? lastDecodeResult.notes : [],
+      output: sourceText,
+      iocs: currentIocs.length > 0 ? currentIocs : IOC.extract(sourceText)
+    });
+    copyText(md, targetMsg, 'Ticket summary copied (Markdown, defanged).');
   }
 
   function clearAll() {
@@ -223,6 +278,7 @@
     output.value = '';
     output.style.height = '';
     copyMsg.textContent = '';
+    lastDecodeResult = null;
     status.replaceChildren();
     status.hidden = true;
     hideIocs();
@@ -271,6 +327,8 @@
   decodeBtn.addEventListener('click', runDecode);
   copyBtn.addEventListener('click', copyOutput);
   if (copyDefangedBtn) copyDefangedBtn.addEventListener('click', copyOutputDefanged);
+  if (copyTicketBtn) copyTicketBtn.addEventListener('click', function () { copyTicketNote(copyMsg); });
+  if (iocCopyTicketBtn) iocCopyTicketBtn.addEventListener('click', function () { copyTicketNote(iocMsg); });
   clearBtn.addEventListener('click', clearAll);
   document.getElementById('ioc-copy-defanged').addEventListener('click', function () {
     copyText(currentIocs.map(function (i) { return i.defanged; }).join('\n'), iocMsg, 'All indicators copied (defanged).');
@@ -288,6 +346,12 @@
       e.preventDefault();
       runDecode();
     }
+  });
+  // Auto-decode on paste so "Paste once" unwraps and extracts IOCs immediately.
+  input.addEventListener('paste', function () {
+    setTimeout(function () {
+      if (input.value.trim() !== '') runDecode();
+    }, 0);
   });
 
   /* ------------------------------------------------------------------ */

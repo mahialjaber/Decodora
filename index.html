@@ -79,6 +79,7 @@
           <div class="actions">
             <button id="copy" type="button">Copy</button>
             <button id="copy-defanged" type="button" title="Copy the output with every URL, domain, IP and email defanged">Copy defanged</button>
+            <button id="copy-ticket" type="button" title="Copy a Markdown SOC ticket summary with decode chain, defanged output, and IOC table">Copy ticket note</button>
             <button id="clear" type="button">Clear</button>
             <span id="copy-msg" class="hint" aria-live="polite"></span>
           </div>
@@ -105,15 +106,16 @@
           <div class="ioc-head">
             <div class="ioc-title-group">
               <h2 class="ioc-title">Indicators of compromise <span id="ioc-count" class="ioc-count"></span></h2>
-              <span class="ioc-pipe-flag">
+              <span id="ioc-pipe-flag" class="ioc-pipe-flag">
                 <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
                   <path d="M3 3v7h9M9 7l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-                Piped from decoded output
+                <span id="ioc-pipe-label">Piped from decoded output</span>
               </span>
             </div>
             <div class="ioc-actions">
               <button id="ioc-copy-defanged" type="button" class="primary">Copy all (defanged)</button>
+              <button id="ioc-copy-ticket" type="button" title="Copy a Markdown SOC ticket summary with decode chain, defanged output, and IOC table">Copy ticket (MD)</button>
               <button id="ioc-copy-raw" type="button">Copy raw</button>
             </div>
           </div>
