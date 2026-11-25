@@ -347,12 +347,6 @@
       runDecode();
     }
   });
-  // Auto-decode on paste so "Paste once" unwraps and extracts IOCs immediately.
-  input.addEventListener('paste', function () {
-    setTimeout(function () {
-      if (input.value.trim() !== '') runDecode();
-    }, 0);
-  });
 
   /* ------------------------------------------------------------------ */
   /* Hanging Light Switch Pull Cord & Theme Management                  */
